@@ -21,9 +21,10 @@ The split is not cosmetic:
 - `photos-media` contains nothing worth preserving, so purging its history is a
   safe, boring operation (see [Deleting](#deleting-a-photo)).
 
-Both are public Pages sites. Public Pages serves `access-control-allow-origin: *`,
-which is what lets the app fetch the manifest cross-origin — so an upload touches
-exactly one repo and never rebuilds the app.
+Both are public Pages sites, and an upload touches only `photos-media` — so
+publishing a photo never rebuilds the app. Here they happen to share an origin
+(see [Live](#live)); if they ever did not, public Pages serves
+`access-control-allow-origin: *`, so the cross-origin manifest fetch works anyway.
 
 ## Media repo layout
 
@@ -40,27 +41,42 @@ forever. The stream reads the last shard first and walks backwards, so scrolling
 only ever hits frozen files. `<id>` is the SHA-256 of the 800px AVIF, truncated —
 content-addressed, so re-uploading the same photo is idempotent.
 
-## Setup
+## Live
 
-1. Create both repos, public. In `photos-media`, add an empty `.nojekyll` file
-   and enable Pages (Settings → Pages → deploy from `main`, root).
-2. In this repo, enable Pages with **GitHub Actions** as the source.
-3. Set repository variables (Settings → Secrets and variables → Actions → Variables):
-   - `PHOTOS_MEDIA_URL` — e.g. `https://you.github.io/photos-media`
-   - `PHOTOS_BASE_PATH` — `/` for a user site or custom domain, `/photos/` for a
-     project site at `you.github.io/photos/`
-4. Push to `main`. The workflow typechecks, tests, builds and deploys.
-5. Open `/upload/`, fill in the repo details and a token (below), and hit
-   **Save & verify**. Bookmark that page — nothing links to it.
+| | |
+|---|---|
+| Stream | <https://marcusklaas.nl/photos> |
+| Upload | <https://marcusklaas.nl/photos/upload/> (unlisted — bookmark it) |
+| Media | <https://marcusklaas.nl/photos-media> |
 
-### The token
+`marcusklaas.github.io` carries the custom domain `marcusklaas.nl`, so project
+sites are served at `marcusklaas.nl/<repo>` automatically. A useful consequence:
+the app and the media are **same-origin**, so manifest fetches need no CORS
+preflight and no second connection.
 
-Create a **fine-grained** PAT: *Only select repositories* → `photos-media`,
-Repository permissions → **Contents: Read and write**, with an expiry date.
+Deployment is automatic — a push to `main` runs typecheck, tests and build, then
+publishes `dist/` to Pages via `.github/workflows/pages.yml`. Build configuration
+lives in repository variables (Settings → Secrets and variables → Actions):
 
-That is the entire scope it needs. Do not grant it access to this repo — the
-whole security story rests on it being unable to touch code. It lives in
-localStorage; the page has a "Forget token" button.
+| Variable | Value |
+|---|---|
+| `PHOTOS_MEDIA_URL` | `https://marcusklaas.nl/photos-media` |
+| `PHOTOS_BASE_PATH` | `/photos/` |
+
+### Remaining manual step: the token
+
+The upload page needs a token, which only you can create:
+
+1. <https://github.com/settings/personal-access-tokens/new>
+2. Repository access → **Only select repositories** → `photos-media`
+3. Repository permissions → **Contents: Read and write** (that is the entire
+   scope it needs)
+4. Set an expiry date
+5. Paste it into <https://marcusklaas.nl/photos/upload/> with owner
+   `marcusklaas`, repo `photos-media`, branch `main`, and hit **Save & verify**
+
+Do not grant it access to the `photos` repo. The whole security story rests on
+that token being unable to touch code.
 
 ## How a photo gets published
 
