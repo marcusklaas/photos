@@ -1,0 +1,81 @@
+:root {
+  /* The one knob worth touching: how wide the column gets on desktop. */
+  --column: 800px;
+  --gap: 4rem;
+  --bg: #0b0b0c;
+  --fg: #ececee;
+  --dim: #8a8a92;
+}
+@media (prefers-color-scheme: light) {
+  :root { --bg: #fbfbfa; --fg: #16161a; --dim: #74747c; }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 400 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+#stream {
+  max-width: var(--column);
+  margin: 0 auto;
+  padding: 4rem 0;
+}
+
+.p { margin: 0 0 var(--gap); }
+
+/* Dominant colour sits here, so the box is filled the instant it is laid out
+   and stays filled until the AVIF decodes. */
+.p a {
+  display: block;
+  background: var(--c, #222);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+/* width/height attributes on the img give the browser an aspect ratio, so the
+   box is reserved before any bytes arrive. This is what keeps CLS at zero. */
+.p img {
+  display: block;
+  width: 100%;
+  height: auto;
+  opacity: 0;
+  transition: opacity .35s ease;
+}
+.p img.on { opacity: 1; }
+@media (prefers-reduced-motion: reduce) {
+  .p img { transition: none; opacity: 1; }
+}
+
+figcaption {
+  color: var(--dim);
+  font-size: 13px;
+  margin: .7rem 2px 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: .5rem;
+}
+figcaption .sep { opacity: .45; }
+figcaption a { color: inherit; text-decoration: none; border-bottom: 1px solid currentColor; }
+figcaption .desc { color: var(--fg); flex-basis: 100%; }
+
+#status {
+  color: var(--dim);
+  font-size: 13px;
+  text-align: center;
+  min-height: 1.5em;
+  margin: 0 0 4rem;
+}
+#sentinel { height: 1px; }
+
+/* Full-bleed below the column width. Portrait photos want the whole screen. */
+@media (max-width: 800px) {
+  #stream { max-width: none; padding: 1.5rem 0; }
+  :root { --gap: 2.5rem; }
+  .p a { border-radius: 0; }
+  figcaption { margin-inline: 1rem; }
+}

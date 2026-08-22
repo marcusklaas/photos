@@ -1,0 +1,19 @@
+{
+  "name": "photos",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "dev": "node build.mjs --dev",
+    "check": "tsc --noEmit",
+    "test": "node scripts/test-manifest.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "typescript": "^5.7.0"
+  },
+  "dependencies": {
+    "@jsquash/avif": "^2.1.1",
+    "exifr": "^7.1.3"
+  }
+}

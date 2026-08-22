@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Upload</title>
+<meta name="robots" content="noindex, nofollow">
+<meta name="color-scheme" content="dark light">
+<link rel="icon" href="data:,">
+<!--INLINE_CSS-->
+</head>
+<body>
+<main>
+  <h1>Upload</h1>
+
+  <details id="settings">
+    <summary>Repository &amp; token <span id="authState" class="pill"></span></summary>
+    <div class="grid">
+      <label>Owner <input id="owner" autocomplete="off" spellcheck="false" placeholder="your-username"></label>
+      <label>Media repo <input id="repo" autocomplete="off" spellcheck="false" placeholder="photos-media"></label>
+      <label>Branch <input id="branch" autocomplete="off" spellcheck="false" value="main"></label>
+      <label>Token <input id="token" type="password" autocomplete="off" placeholder="github_pat_..."></label>
+    </div>
+    <p class="note">
+      Use a <strong>fine-grained</strong> PAT scoped to this one repository, with
+      Contents: read and write, and an expiry date. It is stored in this browser's
+      localStorage. Scoping it here means a leaked token cannot touch the site's code.
+    </p>
+    <div class="row">
+      <button id="save" type="button">Save &amp; verify</button>
+      <button id="forget" type="button" class="ghost">Forget token</button>
+    </div>
+  </details>
+
+  <div id="drop">
+    <p>Drop photos here, or <label class="link" for="files">choose files</label>.</p>
+    <input type="file" id="files" multiple accept="image/jpeg,image/png,image/webp,image/avif" hidden>
+    <p class="note">JPEG, PNG, WebP or AVIF. Everything is resized and re-encoded in this browser &mdash; the original file is never uploaded.</p>
+  </div>
+
+  <ul id="queue"></ul>
+
+  <div id="publishBar">
+    <button id="publish" type="button" disabled>Publish</button>
+    <span id="pubStatus"></span>
+  </div>
+</main>
+<script type="module" src="%BASE%upload/upload.js"></script>
+</body>
+</html>
