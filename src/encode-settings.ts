@@ -4,10 +4,25 @@
  */
 
 /**
- * The only width we publish. The stream column is capped at the same 800px, so
- * a photo is never displayed larger than it was encoded.
+ * Widest the stream column ever gets, in CSS pixels.
+ * MUST match `--column` in src/stream/stream.css.
  */
-export const WIDTHS = [800] as const;
+export const COLUMN_PX = 800;
+
+/**
+ * The only width we publish.
+ *
+ * Rather than shipping a 2x variant for high-DPI screens, the stream lays each
+ * photo out at its own pixel count -- 800 CSS px at dpr 1, 400 at dpr 2 -- so
+ * one image pixel maps to exactly one device pixel and nothing is ever
+ * resampled. Sharp everywhere, at a third of the bytes a 2x variant costs
+ * (measured: 87 kB vs 285 kB average on real photos).
+ *
+ * The tradeoff is physical size: a photo is half as wide on a dpr 2 display as
+ * on a dpr 1 one. If that ever feels too small, the fix is adding COLUMN_PX * 2
+ * back here -- the stream's srcset handles more than one width already.
+ */
+export const WIDTHS = [COLUMN_PX] as const;
 
 /** Photos per manifest shard. */
 export const SHARD_SIZE = 100;

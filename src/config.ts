@@ -1,6 +1,6 @@
-import { WIDTHS, SHARD_SIZE, ENCODE } from './encode-settings.js';
+import { COLUMN_PX, WIDTHS, SHARD_SIZE, ENCODE } from './encode-settings.js';
 
-export { WIDTHS, SHARD_SIZE, ENCODE };
+export { COLUMN_PX, WIDTHS, SHARD_SIZE, ENCODE };
 
 declare const __MEDIA_BASE_URL__: string;
 declare const __DEV__: boolean;

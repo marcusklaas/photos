@@ -1,5 +1,6 @@
 :root {
-  /* The one knob worth touching: how wide the column gets on desktop. */
+  /* How wide the column gets on desktop.
+     MUST match COLUMN_PX in src/encode-settings.ts -- srcset sizing reads it. */
   --column: 800px;
   --gap: 4rem;
   --bg: #0b0b0c;
@@ -26,7 +27,13 @@ body {
   padding: 4rem 0;
 }
 
-.p { margin: 0 auto var(--gap); }
+.p {
+  margin: 0 auto var(--gap);
+  /* One image pixel per device pixel: the photo's intrinsic width (--nat,
+     set per figure) divided by the display's pixel ratio (--dpr, published by
+     main.ts). Never wider than the column, and never upscaled. */
+  max-width: min(var(--column), calc(var(--nat, var(--column)) / var(--dpr, 1)));
+}
 
 /* Dominant colour sits here, so the box is filled the instant it is laid out
    and stays filled until the AVIF decodes. */

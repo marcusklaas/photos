@@ -1,5 +1,5 @@
 import type { Index, Photo } from '../types.js';
-import { WIDTHS, mediaUrl, variantUrl } from '../config.js';
+import { COLUMN_PX, WIDTHS, mediaUrl, variantUrl } from '../config.js';
 
 const stream = document.getElementById('stream') as HTMLElement;
 const sentinel = document.getElementById('sentinel') as HTMLElement;
@@ -63,10 +63,11 @@ function render(p: Photo): HTMLElement {
   const fig = document.createElement('figure');
   fig.className = 'p';
 
-  // Never display a photo wider than it was encoded -- upscaling looks soft.
+  // The photo's own pixel width. CSS divides it by --dpr to lay the photo out
+  // at exactly one image pixel per device pixel.
   const widths = p.v.length ? p.v : [...WIDTHS];
   const largest = Math.max(...widths);
-  fig.style.maxWidth = `${Math.min(p.w, largest)}px`;
+  fig.style.setProperty('--nat', `${p.w}px`);
 
   const link = document.createElement('a');
   link.style.setProperty('--c', p.c);
@@ -78,7 +79,10 @@ function render(p: Photo): HTMLElement {
   img.src = variantUrl(p.id, largest);
   if (widths.length > 1) {
     img.srcset = widths.map((w) => `${variantUrl(p.id, w)} ${w}w`).join(', ');
-    img.sizes = `(max-width: ${largest}px) 100vw, ${largest}px`;
+    // sizes describes the LAYOUT width, not the variant width. Getting this
+    // wrong makes the browser pick by the wrong yardstick -- quoting 1600 here
+    // would pull the 2x file down on 1x screens too.
+    img.sizes = `(max-width: ${COLUMN_PX}px) 100vw, ${COLUMN_PX}px`;
   }
   img.width = p.w;
   img.height = p.h;
@@ -129,6 +133,21 @@ async function loadNextShard(): Promise<void> {
   }
 }
 
+/**
+ * Publishes devicePixelRatio to CSS, where .p divides the photo's intrinsic
+ * width by it. Re-arms after every change: dpr is not fixed -- it moves when
+ * the window is dragged to another monitor and when the user zooms.
+ */
+function trackDpr(): void {
+  const apply = (): void => {
+    document.documentElement.style.setProperty('--dpr', String(window.devicePixelRatio || 1));
+    window
+      .matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`)
+      .addEventListener('change', apply, { once: true });
+  };
+  apply();
+}
+
 async function main(): Promise<void> {
   try {
     const res = await fetch(mediaUrl('index.json'));
@@ -159,4 +178,5 @@ async function main(): Promise<void> {
   io.observe(sentinel);
 }
 
+trackDpr();
 void main();

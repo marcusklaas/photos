@@ -43,9 +43,21 @@ shard it lands in, and the uploader rewrites nothing else. `<id>` is the SHA-256
 of the AVIF, truncated — content-addressed, so re-uploading the same photo is
 idempotent.
 
-There is a single 800px variant. Larger ones were dropped: the display column is
-800px wide, so anything bigger only paid off on high-DPI screens, and at this
-compression level it was not worth the bytes.
+There is a single 800px variant, and the stream lays each photo out at **one
+image pixel per device pixel** — 800 CSS px at `devicePixelRatio` 1, 400 at 2 —
+so nothing is ever resampled.
+
+This is worth understanding before changing it. CSS pixels are not device
+pixels: an 800px image at its natural size is 800 *CSS* px, which on a 2x display
+is 1600 *device* px, so the browser upscales it and it looks soft. There is no
+"render natively" mode that avoids this — the only fixes are a higher-resolution
+variant or a smaller displayed size. We chose the latter: sharp everywhere at
+87 kB/photo, where a 2x variant measured 285 kB.
+
+The tradeoff is physical size — a photo is half as wide on a retina screen as on
+a 1x one, and leaves margins on high-DPI phones. If that ever grates, add
+`COLUMN_PX * 2` back to `WIDTHS`; the stream's srcset already handles multiple
+widths.
 
 ## Live
 
