@@ -12,7 +12,7 @@ import { createHash } from 'node:crypto';
 const wasmPath = new URL('../node_modules/@jsquash/avif/codec/enc/avif_enc.wasm', import.meta.url);
 await initAvif(await WebAssembly.compile(await readFile(wasmPath)));
 
-const WIDTHS = [400, 800, 1600];
+const WIDTHS = [800];
 // Fixtures are throwaway; don't spend real encode time on them.
 const OPTS = { quality: 55, speed: 8, subsample: 1 };
 
@@ -97,12 +97,12 @@ function dominant(img) {
 // Varied metadata, deliberately including a photo with no metadata at all so
 // the no-caption path gets exercised.
 const META = [
-  { t: '2026-08-14T18:22:10Z', g: [38.7223, -9.1393], d: 'Late light on the way down from the castle.' },
-  { t: '2026-08-02T09:05:00Z', g: [52.3676, 4.9041] },
-  { t: '2026-07-19T14:48:33Z', d: 'Timestamp kept, location stripped.' },
-  { t: '2026-06-30T20:15:00Z', g: [46.5197, 6.6323] },
-  { d: 'Everything stripped. Description only.' },
-  { t: '2026-05-11T11:00:00Z' },
+  { t: '2026-08-14T18:22:10', g: [38.7223, -9.1393], d: 'Late light on the way down from the castle.' },
+  { t: '2026-08-02T09:05:00', g: [52.3676, 4.9041] },
+  { t: '2026-07-19T14:48:33', d: 'Timestamp kept, location stripped.' },
+  { t: '2026-06-30T20:15:00', g: [46.5197, 6.6323] },
+  { t: '2026-05-25T16:40:00', d: 'No location, description only.' },
+  { t: '2026-05-11T11:00:00' },
 ];
 
 // Portrait-leaning shapes, plus one landscape to check the layout holds.
@@ -115,9 +115,9 @@ await mkdir('fixture/m', { recursive: true });
 const photos = [];
 for (let i = 0; i < META.length; i++) {
   const [aw, ah] = SHAPES[i];
-  const full = generate(i * 7919 + 13, 1600, Math.round((1600 * ah) / aw));
+  const full = generate(i * 7919 + 13, 800, Math.round((800 * ah) / aw));
   const variants = {};
-  for (const w of WIDTHS) variants[w] = w === 1600 ? full : resize(full, w);
+  for (const w of WIDTHS) variants[w] = w === 800 ? full : resize(full, w);
 
   const encoded = {};
   for (const w of WIDTHS) {
@@ -130,12 +130,12 @@ for (let i = 0; i < META.length; i++) {
 
   photos.push({
     id, w: full.width, h: full.height, v: WIDTHS,
-    c: dominant(variants[400]), ...META[i],
+    c: dominant(variants[800]), ...META[i],
   });
 }
 
-// Shards are oldest-first; META is authored oldest-last, so reverse it.
-photos.reverse();
+// Shards are ordered oldest-first BY TIMESTAMP, which is what the stream reads.
+photos.sort((a, b) => (a.t < b.t ? -1 : a.t > b.t ? 1 : 0));
 await writeFile('fixture/m/0000.json', JSON.stringify(photos));
 await writeFile('fixture/index.json', JSON.stringify({
   version: 1, shardSize: 100, total: photos.length,

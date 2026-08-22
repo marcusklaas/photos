@@ -33,13 +33,19 @@ photos-media/
   .nojekyll
   index.json                # shard table; small, rewritten on every upload
   m/0000.json 0001.json …   # 100 photos each, oldest-first
-  p/<id>-400.avif  <id>-800.avif  <id>-1600.avif
+  p/<id>-800.avif           # one variant; the column is capped at 800px too
 ```
 
-**Only the last shard is ever mutated.** Earlier shards are immutable and cache
-forever. The stream reads the last shard first and walks backwards, so scrolling
-only ever hits frozen files. `<id>` is the SHA-256 of the 800px AVIF, truncated —
-content-addressed, so re-uploading the same photo is idempotent.
+Shards are ordered **oldest-first by capture time**, not upload time, and the
+stream reads the last shard first and walks backwards. Publishing recent photos
+therefore touches only the tail shard; backfilling an old photo rewrites the
+shard it lands in, and the uploader rewrites nothing else. `<id>` is the SHA-256
+of the AVIF, truncated — content-addressed, so re-uploading the same photo is
+idempotent.
+
+There is a single 800px variant. Larger ones were dropped: the display column is
+800px wide, so anything bigger only paid off on high-DPI screens, and at this
+compression level it was not worth the bytes.
 
 ## Live
 
@@ -87,7 +93,8 @@ Everything happens in your browser before anything is committed:
    in EXIF orientation — we re-encode raw pixels, so skipping this publishes
    sideways photos sideways.
 3. Downscaled in halving steps (a single big-ratio `drawImage` aliases badly),
-   then encoded to AVIF at 400/800/1600 px wide by a WASM encoder in a worker.
+   then encoded to AVIF at 800px wide by a WASM encoder in a worker. Narrower
+   sources are never upscaled — they publish and display at their own width.
 4. Blobs, a tree and a commit go up through the Git Data API as **one atomic
    commit**. If the branch moved meanwhile, it re-reads the manifest and retries
    rather than force-pushing over whatever landed.
@@ -96,9 +103,13 @@ Everything happens in your browser before anything is committed:
 EXIF blob is ever published — which does more for privacy than any amount of
 history rewriting.
 
-Time and location default to *kept*, with a per-photo toggle to strip either, plus
-an optional description. Stripped fields are **omitted from the JSON, never
-nulled**, so the wire format carries no trace that they existed.
+**Capture time is required** — the stream is ordered by it. It is prefilled from
+EXIF (or the file's own mtime, flagged as a guess) and is editable per photo, but
+publishing is blocked until every queued photo has one.
+
+Location defaults to *kept*, at full EXIF precision, with a per-photo toggle to
+strip it, plus an optional description. Stripped fields are **omitted from the
+JSON, never nulled**, so the wire format carries no trace that they existed.
 
 ### Not supported: HEIC
 
@@ -108,16 +119,37 @@ rejected with a clear message. JPEG, PNG, WebP and AVIF work. Adding
 
 ## Tuning compression
 
-`src/config.ts` holds the encoder knobs, using `@jsquash/avif`'s option names:
+The encoder is **libavif v1.0.1** compiled to WASM, via `@jsquash/avif` (a
+repackaging of Squoosh's codec). It runs single-threaded: the multithreaded build
+needs `SharedArrayBuffer`, which needs COOP/COEP headers, which Pages cannot set.
 
-```ts
-quality: 55,   // 0-100, HIGHER is better (not libavif's cq-level)
-speed: 3,      // 0-10, LOWER is slower and compresses better
-subsample: 1,  // 0=YUV400 1=YUV420 2=YUV422 3=YUV444
+`src/encode-settings.ts` holds the options — library defaults, except
+`quality: 55` (0-100, higher is better; this is *not* libavif's cq-level).
+
+Lowering `speed` below its default of 6 is a trap, measured on a 1600x2000 image:
+
+| speed | size | time |
+|---|---|---|
+| 0 | 352 kB | 262 s |
+| 3 | 334 kB | 65 s |
+| 6 | 325 kB | 3.0 s |
+| 8 | 311 kB | 0.6 s |
+
+Slower settings produced *larger* files here, and there is a cliff between 4 and 6
+where libaom changes algorithm. Whether the size inversion is real or an artifact
+of grain in the test image is unsettled — but there is no reading of this where
+sub-default `speed` earns its 100x time cost.
+
+Measure on your own photos before changing anything:
+
+```sh
+npm run bench -- photo.jpg
+npm run bench -- --sweep quality photo.jpg
+npm run bench -- --sweep speed   photo.jpg
 ```
 
-These are starting points, not settled values. Tune them against your own photos
-— synthetic test images compress nothing like real ones.
+Synthetic images are useless for this — fine grain dominates the bitrate and
+behaves nothing like real detail.
 
 ## Development
 
@@ -128,6 +160,7 @@ npm run dev                     # builds to dist/, copies fixture to dist/media
 npx serve dist                  # or any static server
 npm run check                   # typecheck
 npm test                        # sharding logic
+npm run bench -- photo.jpg      # encoder size/time on a real photo
 ```
 
 The fixture means the whole stream is testable with no network and no GitHub.

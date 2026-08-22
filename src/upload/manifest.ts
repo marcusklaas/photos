@@ -3,7 +3,7 @@ import type { Index, Photo } from '../types.js';
 export type ShardWrite = { path: string; photos: Photo[] };
 
 export type Plan = {
-  /** Shard files to write, keyed by media-repo path. */
+  /** Only the shards whose contents actually changed. */
   shards: ShardWrite[];
   index: Index;
 };
@@ -17,58 +17,49 @@ export const emptyIndex = (shardSize: number): Index => ({
   shards: [],
 });
 
+/** Oldest first, with a stable tiebreak so equal timestamps never reshuffle. */
+export function byTime(a: Photo, b: Photo): number {
+  if (a.t !== b.t) return a.t < b.t ? -1 : 1;
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
 /**
- * Works out which shard files need rewriting to append `additions`.
+ * Merges `additions` into the existing photos and re-chunks into shards.
  *
- * Shards are oldest-first and only the LAST one is ever mutated, so every
- * earlier shard stays byte-identical forever and can be cached indefinitely.
- * `tailPhotos` must be the current contents of the last shard (empty if there
- * is none) — the caller reads it from the GitHub API rather than the Pages CDN,
- * which can be stale.
+ * The stream is ordered by capture time, not upload time, so a backfilled old
+ * photo has to land in an old shard -- shards cannot be strictly append-only.
+ * To keep that cheap, this compares each resulting chunk against what is
+ * already on disk and returns ONLY the shards that genuinely changed. Uploading
+ * recent photos still touches nothing but the tail.
+ *
+ * `existing` is the current contents of every shard, in index order. The caller
+ * reads it from the GitHub API rather than the Pages CDN, which can be stale.
  */
-export function planAppend(index: Index, tailPhotos: Photo[], additions: Photo[]): Plan {
+export function planPublish(index: Index, existing: Photo[][], additions: Photo[]): Plan {
   const size = index.shardSize || 100;
+
+  const merged = [...existing.flat(), ...additions].sort(byTime);
+
+  const chunks: Photo[][] = [];
+  for (let i = 0; i < merged.length; i += size) chunks.push(merged.slice(i, i + size));
+  if (!chunks.length) chunks.push([]);
+
   const shards: ShardWrite[] = [];
-
-  // Start from the existing tail shard, or open a fresh one if there is none.
-  let cursor = Math.max(0, index.shards.length - 1);
-  let current: Photo[] = index.shards.length ? [...tailPhotos] : [];
-  let dirty = index.shards.length === 0;
-
-  const flush = () => {
-    if (dirty) shards.push({ path: `m/${shardName(cursor)}`, photos: [...current] });
-  };
-
-  for (const p of additions) {
-    if (current.length >= size) {
-      // Tail was already full: leave it untouched and open the next shard.
-      flush();
-      cursor++;
-      current = [];
-      dirty = true;
-    }
-    current.push(p);
-    dirty = true;
-  }
-  flush();
-
-  // Rebuild the shard table: untouched entries keep their counts, the shards we
-  // just wrote take theirs from the plan.
-  const table = index.shards.map((s) => ({ ...s }));
-  for (const w of shards) {
-    const file = w.path.slice('m/'.length);
-    const at = table.findIndex((s) => s.file === file);
-    if (at >= 0) table[at] = { file, count: w.photos.length };
-    else table.push({ file, count: w.photos.length });
-  }
+  chunks.forEach((photos, i) => {
+    // Exact comparison against what is published, so an unchanged shard is not
+    // rewritten and stays cached.
+    const before = existing[i];
+    if (before && JSON.stringify(before) === JSON.stringify(photos)) return;
+    shards.push({ path: `m/${shardName(i)}`, photos });
+  });
 
   return {
     shards,
     index: {
       version: 1,
       shardSize: size,
-      total: table.reduce((n, s) => n + s.count, 0),
-      shards: table,
+      total: merged.length,
+      shards: chunks.map((c, i) => ({ file: shardName(i), count: c.length })),
     },
   };
 }

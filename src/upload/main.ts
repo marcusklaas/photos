@@ -1,7 +1,7 @@
 import type { Index, Photo } from '../types.js';
 import { SHARD_SIZE } from '../config.js';
 import { readExif, type Exif } from './exif.js';
-import { emptyIndex, planAppend } from './manifest.js';
+import { emptyIndex, planPublish } from './manifest.js';
 import {
   checkAccess,
   commitFiles,
@@ -100,7 +100,6 @@ type Item = {
   status: 'pending' | 'working' | 'ready' | 'error';
   error?: string;
   exif: Exif;
-  keepT: boolean;
   keepG: boolean;
   desc: string;
   ready?: Ready;
@@ -198,25 +197,24 @@ function buildRow(item: Item): void {
 
   const keeps = el('div', 'keeps');
 
-  // --- timestamp: kept by default, stripping is a deliberate act
+  // --- timestamp: REQUIRED, because the stream is ordered by it
   const tWrap = el('label', 'keep');
-  const tBox = el('input');
-  tBox.type = 'checkbox';
-  tBox.checked = item.keepT;
   const tInput = el('input');
   tInput.type = 'datetime-local';
+  tInput.required = true;
   tInput.value = item.timeValue;
-  tInput.disabled = !item.keepT;
-  tWrap.append(tBox, el('span', undefined, 'Time'), tInput);
-  if (!item.exif.t) tWrap.append(el('span', 'val', 'none in file'));
-  tBox.addEventListener('change', () => {
-    item.keepT = tBox.checked;
-    tInput.disabled = !tBox.checked;
-    tWrap.classList.toggle('off', !tBox.checked);
-  });
-  tInput.addEventListener('change', () => {
+  tWrap.append(el('span', undefined, 'Time'), tInput);
+  const tHint = el('span', 'val', item.exif.t ? '' : 'not in file - check this');
+  tWrap.append(tHint);
+  const syncTime = () => {
     item.timeValue = tInput.value;
-  });
+    tWrap.classList.toggle('missing', !tInput.value);
+    tHint.textContent = tInput.value ? (item.exif.t ? '' : 'guessed') : 'required';
+    refreshPublish();
+  };
+  tInput.addEventListener('change', syncTime);
+  tInput.addEventListener('input', syncTime);
+  tWrap.classList.toggle('missing', !item.timeValue);
   keeps.append(tWrap);
 
   // --- location: full EXIF precision, no rounding, no third-party lookup
@@ -259,6 +257,20 @@ function buildRow(item: Item): void {
   row.append(remove);
 }
 
+/** "YYYY-MM-DDTHH:mm:ss" in local time, matching how EXIF records wall clock. */
+function localIsoFromMs(ms: number): string {
+  const d = new Date(ms);
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+/** datetime-local gives minute precision; the wire format wants seconds. */
+function normaliseTime(value: string): string {
+  return value.length === 16 ? `${value}:00` : value;
+}
+
+const hasTime = (i: Item): boolean => Boolean(i.timeValue);
+
 async function sha256Short(buf: ArrayBuffer): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', buf);
   return [...new Uint8Array(digest)]
@@ -272,7 +284,6 @@ async function addFile(file: File): Promise<void> {
     file,
     status: 'pending',
     exif: {},
-    keepT: true,
     keepG: true,
     desc: '',
     timeValue: '',
@@ -302,7 +313,9 @@ async function addFile(file: File): Promise<void> {
   // EXIF first: re-encoding destroys it, so anything not read here is gone.
   item.exif = await readExif(file);
   item.keepG = Boolean(item.exif.g);
-  item.timeValue = item.exif.t ? item.exif.t.slice(0, 16) : '';
+  // Always prefill something: a blank required field is a dead end. EXIF if we
+  // have it, otherwise the file's own timestamp, flagged in the UI as a guess.
+  item.timeValue = (item.exif.t ?? localIsoFromMs(file.lastModified)).slice(0, 16);
 
   buildRow(item);
   item.status = 'working';
@@ -342,12 +355,22 @@ async function addFile(file: File): Promise<void> {
 function refreshPublish(): void {
   const ready = items.filter((i) => i.status === 'ready');
   const busy = items.some((i) => i.status === 'working' || i.status === 'pending');
-  els.publish.disabled = ready.length === 0 || busy;
+  const undated = ready.filter((i) => !hasTime(i)).length;
+
+  els.publish.disabled = ready.length === 0 || busy || undated > 0;
   els.publish.textContent = ready.length
     ? `Publish ${ready.length} photo${ready.length === 1 ? '' : 's'}`
     : 'Publish';
+
   if (busy) els.pubStatus.textContent = 'encoding...';
-  else if (els.pubStatus.textContent === 'encoding...') els.pubStatus.textContent = '';
+  else if (undated) {
+    els.pubStatus.textContent = `${undated} photo${undated === 1 ? ' needs a' : 's need a'} time before publishing.`;
+  } else if (
+    els.pubStatus.textContent === 'encoding...' ||
+    els.pubStatus.textContent.endsWith('before publishing.')
+  ) {
+    els.pubStatus.textContent = '';
+  }
 }
 
 // ------------------------------------------------------------------ input
@@ -383,12 +406,9 @@ function toPhoto(item: Item): Photo {
     h: ready.h,
     v: ready.variants.map(([w]) => w),
     c: ready.c,
+    t: normaliseTime(item.timeValue),
   };
 
-  // Omitted, never nulled: a stripped field leaves no trace in the JSON.
-  if (item.keepT && item.timeValue) {
-    photo.t = item.timeValue.length === 16 ? `${item.timeValue}:00` : item.timeValue;
-  }
   if (item.keepG && item.exif.g) photo.g = item.exif.g;
   const desc = item.desc.trim();
   if (desc) photo.d = desc;
@@ -427,15 +447,17 @@ async function publish(): Promise<void> {
     try {
       els.pubStatus.textContent = 'reading manifest...';
       const index = (await readJson<Index>(token, ref, 'index.json')) ?? emptyIndex(SHARD_SIZE);
-      const tailEntry = index.shards[index.shards.length - 1];
-      const tail = tailEntry
-        ? ((await readJson<Photo[]>(token, ref, `m/${tailEntry.file}`)) ?? [])
-        : [];
+      // Ordering is by capture time, so an addition can land in any shard --
+      // we need all of them, not just the tail.
+      const existing: Photo[][] = [];
+      for (const entry of index.shards) {
+        existing.push((await readJson<Photo[]>(token, ref, `m/${entry.file}`)) ?? []);
+      }
 
-      const plan = planAppend(index, tail, photos);
+      const plan = planPublish(index, existing, photos);
       const files: FileWrite[] = [
         ...imageFiles,
-        ...plan.shards.map((s) => ({ path: s.path, content: JSON.stringify(s.photos) })),
+        ...plan.shards.map((sh) => ({ path: sh.path, content: JSON.stringify(sh.photos) })),
         { path: 'index.json', content: JSON.stringify(plan.index) },
       ];
 

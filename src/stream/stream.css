@@ -26,7 +26,7 @@ body {
   padding: 4rem 0;
 }
 
-.p { margin: 0 0 var(--gap); }
+.p { margin: 0 auto var(--gap); }
 
 /* Dominant colour sits here, so the box is filled the instant it is laid out
    and stays filled until the AVIF decodes. */
@@ -72,10 +72,10 @@ figcaption .desc { color: var(--fg); flex-basis: 100%; }
 }
 #sentinel { height: 1px; }
 
-/* Full-bleed below the column width. Portrait photos want the whole screen. */
+/* Near-full-bleed below the column width, but keep a little breathing room at
+   the edges rather than running the photo into the bezel. */
 @media (max-width: 800px) {
-  #stream { max-width: none; padding: 1.5rem 0; }
-  :root { --gap: 2.5rem; }
-  .p a { border-radius: 0; }
-  figcaption { margin-inline: 1rem; }
+  :root { --gap: 2.5rem; --edge: 12px; }
+  #stream { max-width: none; padding: 1.5rem var(--edge); }
+  figcaption { margin-inline: 0; }
 }

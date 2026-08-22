@@ -19,14 +19,12 @@ const dateFmt = new Intl.DateTimeFormat(undefined, {
 function caption(p: Photo): HTMLElement | null {
   const parts: (Node | string)[] = [];
 
-  if (p.t) {
-    const d = new Date(p.t);
-    if (!Number.isNaN(d.valueOf())) {
-      const time = document.createElement('time');
-      time.dateTime = p.t;
-      time.textContent = dateFmt.format(d);
-      parts.push(time);
-    }
+  const d = new Date(p.t);
+  if (!Number.isNaN(d.valueOf())) {
+    const time = document.createElement('time');
+    time.dateTime = p.t;
+    time.textContent = dateFmt.format(d);
+    parts.push(time);
   }
 
   if (p.g) {
@@ -65,19 +63,23 @@ function render(p: Photo): HTMLElement {
   const fig = document.createElement('figure');
   fig.className = 'p';
 
+  // Never display a photo wider than it was encoded -- upscaling looks soft.
+  const widths = p.v.length ? p.v : [...WIDTHS];
+  const largest = Math.max(...widths);
+  fig.style.maxWidth = `${Math.min(p.w, largest)}px`;
+
   const link = document.createElement('a');
   link.style.setProperty('--c', p.c);
-  // Largest variant we actually published, for click-through.
-  const largest = Math.max(...p.v);
   link.href = variantUrl(p.id, largest);
   link.target = '_blank';
   link.rel = 'noopener';
 
   const img = document.createElement('img');
-  const widths = p.v.length ? p.v : [...WIDTHS];
-  img.src = variantUrl(p.id, widths.includes(800) ? 800 : largest);
-  img.srcset = widths.map((w) => `${variantUrl(p.id, w)} ${w}w`).join(', ');
-  img.sizes = '(max-width: 800px) 100vw, 800px';
+  img.src = variantUrl(p.id, largest);
+  if (widths.length > 1) {
+    img.srcset = widths.map((w) => `${variantUrl(p.id, w)} ${w}w`).join(', ');
+    img.sizes = `(max-width: ${largest}px) 100vw, ${largest}px`;
+  }
   img.width = p.w;
   img.height = p.h;
   img.loading = 'lazy';

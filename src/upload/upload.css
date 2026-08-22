@@ -70,6 +70,9 @@ summary { cursor: pointer; font-weight: 500; }
 .keep input[type=checkbox] { accent-color: var(--accent); margin: 0; flex: none; }
 .keep .val { color: var(--dim); font-size: 12px; font-variant-numeric: tabular-nums; }
 .keep.off .val { text-decoration: line-through; opacity: .5; }
+/* A required time that is blank should be impossible to miss. */
+.keep.missing input[type=datetime-local] { border-color: var(--bad); }
+.keep.missing .val { color: var(--bad); }
 .desc { margin-top: .6rem; }
 
 #publishBar {
