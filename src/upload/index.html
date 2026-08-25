@@ -32,6 +32,31 @@
     </div>
   </details>
 
+  <details id="encoding">
+    <summary>Encoding <span id="encodeState" class="pill"></span></summary>
+    <div class="grid">
+      <label>Quality
+        <input id="encQuality" type="number" min="1" max="100" step="1" inputmode="numeric">
+      </label>
+      <label>Speed
+        <input id="encSpeed" type="number" min="0" max="10" step="1" inputmode="numeric">
+      </label>
+      <label class="keep sharp">
+        <input id="encSharp" type="checkbox">
+        <span>Sharp YUV</span>
+      </label>
+    </div>
+    <p class="note">
+      <strong>Quality</strong> 0&ndash;100, higher is better; this is not libavif's cq-level.
+      <strong>Speed</strong> 0&ndash;10, lower is slower and denser &mdash; below 4 costs enormous
+      time for nothing. <strong>Sharp YUV</strong> cleans up colour on saturated edges for
+      almost no bytes. Stored in this browser only, and applied to the next photo you add.
+    </p>
+    <div class="row">
+      <button id="encReset" type="button" class="ghost">Reset to defaults</button>
+    </div>
+  </details>
+
   <div id="drop">
     <p>Drop photos here, or <label class="link" for="files">choose files</label>.</p>
     <input type="file" id="files" multiple accept="image/jpeg,image/png,image/webp,image/avif" hidden>

@@ -13,7 +13,8 @@ body {
 main { max-width: 860px; margin: 0 auto; padding: 2rem 1rem 6rem; }
 h1 { font-size: 1.3rem; margin: 0 0 1.5rem; font-weight: 600; }
 
-input[type=text], input[type=password], input[type=datetime-local], input:not([type]) {
+input[type=text], input[type=password], input[type=datetime-local],
+input[type=number], input:not([type]) {
   width: 100%; padding: .45rem .6rem; background: var(--bg); color: var(--fg);
   border: 1px solid var(--line); border-radius: 5px; font: inherit;
 }
@@ -30,10 +31,13 @@ button {
 button.ghost { background: transparent; color: var(--dim); }
 button:disabled { opacity: .45; cursor: not-allowed; }
 
-#settings {
+#settings, #encoding {
   background: var(--panel); border: 1px solid var(--line);
   border-radius: 8px; padding: .8rem 1rem; margin-bottom: 1.25rem;
 }
+/* The checkbox sits in the same grid as the two number inputs, so pull it down
+   to sit on their baseline rather than the top of the cell. */
+.keep.sharp { align-self: end; padding-bottom: .45rem; }
 summary { cursor: pointer; font-weight: 500; }
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: .75rem; margin: 1rem 0; }
 .row { display: flex; gap: .5rem; }

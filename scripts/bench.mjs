@@ -2,41 +2,60 @@
  * Measures AVIF size and encode time across encoder settings, on YOUR photos.
  *
  *   node scripts/bench.mjs photo.jpg [more.jpg ...]
+ *   node scripts/bench.mjs --compare 55,68 photo.jpg   # can you see the difference?
  *   node scripts/bench.mjs --sweep speed   photo.jpg
  *   node scripts/bench.mjs --sweep quality photo.jpg
  *
- * With no --sweep it runs the real quality ladder, rung by rung, exactly as the
- * uploader does -- so it answers the two questions worth asking about
- * QUALITY_LADDER and BUDGET_BYTES_PER_MPX: what does a photo cost, and does the
- * budget bite often enough (or too often) on the photos you actually publish.
+ * With no flags it encodes at ENCODE_DEFAULTS, which is what the upload page
+ * uses until you override it there.
+ *
+ * --compare answers the question the other modes cannot: can you see it. It
+ * encodes at each quality given (default: the old fixed 55 against the current
+ * default), decodes them back, prints how far each landed from the source
+ * pixels, and writes the decoded results to bench-out/ as PNG so you can flip
+ * between them at 1:1. Numbers first, but the numbers are not the verdict --
+ * your eyes are.
  *
  * Synthetic test images are useless for this: fine grain dominates the bitrate
  * and behaves nothing like real detail. Point it at photos you would actually
  * publish, at the size we actually publish (default 800px wide).
  */
 import encodeAvif, { init as initAvif } from '@jsquash/avif/encode.js';
+import decodeAvif, { init as initAvifDec } from '@jsquash/avif/decode.js';
 import decodeJpeg, { init as initJpeg } from '@jsquash/jpeg/decode.js';
 import decodePng, { init as initPng } from '@jsquash/png/decode.js';
-import { readFile } from 'node:fs/promises';
+import encodePng, { init as initPngEnc } from '@jsquash/png/encode.js';
+import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
-import {
-  ENCODE,
-  WIDTHS,
-  QUALITY_LADDER,
-  budgetFor,
-  encodeWithinBudget,
-} from '../src/encode-settings.ts';
+import { ENCODE_DEFAULTS, ENCODE_BOUNDS, WIDTHS } from '../src/encode-settings.ts';
 
 const args = process.argv.slice(2);
 let sweep = null;
+let compare = null;
 const files = [];
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--sweep') sweep = args[++i];
-  else files.push(args[i]);
+  else if (args[i] === '--compare') {
+    // The qualities are optional: "--compare 55,68 a.jpg" or just "--compare a.jpg".
+    const next = /^\d+(,\d+)*$/.test(args[i + 1] ?? '') ? args[++i] : '';
+    compare = next ? next.split(',').map(Number) : [55, ENCODE_DEFAULTS.quality];
+  } else files.push(args[i]);
 }
 
 if (!files.length) {
-  console.error('usage: node scripts/bench.mjs [--sweep speed|quality] <image> [...]');
+  console.error(
+    'usage: node scripts/bench.mjs [--compare [q,q]] [--sweep speed|quality] <image> [...]',
+  );
+  process.exit(1);
+}
+
+const badQuality = (compare ?? []).find(
+  (q) => q < ENCODE_BOUNDS.quality.min || q > ENCODE_BOUNDS.quality.max,
+);
+if (badQuality !== undefined) {
+  console.error(
+    `quality ${badQuality} is outside ${ENCODE_BOUNDS.quality.min}-${ENCODE_BOUNDS.quality.max}`,
+  );
   process.exit(1);
 }
 
@@ -45,6 +64,10 @@ const compile = async (rel) => WebAssembly.compile(await readFile(new URL(rel, N
 await initAvif(await compile('@jsquash/avif/codec/enc/avif_enc.wasm'));
 await initJpeg(await compile('@jsquash/jpeg/codec/dec/mozjpeg_dec.wasm'));
 await initPng(await compile('@jsquash/png/codec/pkg/squoosh_png_bg.wasm'));
+if (compare) {
+  await initAvifDec(await compile('@jsquash/avif/codec/dec/avif_dec.wasm'));
+  await initPngEnc(await compile('@jsquash/png/codec/pkg/squoosh_png_bg.wasm'));
+}
 
 const TARGET = Number(process.env.BENCH_WIDTH ?? WIDTHS[WIDTHS.length - 1]);
 
@@ -77,6 +100,49 @@ async function load(file) {
   return { source: bytes.length, img: resize(raw, TARGET) };
 }
 
+/**
+ * Distortion against the source pixels. PSNR is blunt but comparable across
+ * rungs; SSIM tracks structure, which is closer to what "looks worse" means.
+ * Neither is a verdict -- --compare writes the decoded PNGs so you can look.
+ */
+function psnr(a, b) {
+  let se = 0;
+  for (let i = 0; i < a.data.length; i++) if (i % 4 !== 3) se += (a.data[i] - b.data[i]) ** 2;
+  const mse = se / ((a.data.length / 4) * 3);
+  return mse === 0 ? Infinity : 10 * Math.log10((255 * 255) / mse);
+}
+
+const luma = (img) => {
+  const g = new Float64Array(img.width * img.height);
+  for (let i = 0; i < g.length; i++)
+    g[i] = 0.2126 * img.data[i * 4] + 0.7152 * img.data[i * 4 + 1] + 0.0722 * img.data[i * 4 + 2];
+  return g;
+};
+
+/** Mean SSIM over 8x8 luma windows, stepped by 4. */
+function ssim(a, b, w, h) {
+  const C1 = (0.01 * 255) ** 2, C2 = (0.03 * 255) ** 2;
+  let total = 0, n = 0;
+  for (let by = 0; by + 8 <= h; by += 4) {
+    for (let bx = 0; bx + 8 <= w; bx += 4) {
+      let ma = 0, mb = 0;
+      for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) {
+        ma += a[(by + y) * w + bx + x]; mb += b[(by + y) * w + bx + x];
+      }
+      ma /= 64; mb /= 64;
+      let va = 0, vb = 0, cov = 0;
+      for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) {
+        const da = a[(by + y) * w + bx + x] - ma, db = b[(by + y) * w + bx + x] - mb;
+        va += da * da; vb += db * db; cov += da * db;
+      }
+      va /= 63; vb /= 63; cov /= 63;
+      total += ((2 * ma * mb + C1) * (2 * cov + C2)) / ((ma * ma + mb * mb + C1) * (va + vb + C2));
+      n++;
+    }
+  }
+  return total / n;
+}
+
 const kB = (n) => `${(n / 1024).toFixed(0).padStart(5)} kB`;
 const secs = (ms) => `${(ms / 1000).toFixed(1).padStart(6)}s`;
 
@@ -91,39 +157,53 @@ const SWEEPS = {
   quality: [35, 45, 55, 62, 68, 75, 85],
 };
 
-/** Which rung photos settle on -- i.e. how often the budget actually bites. */
-const landed = new Map();
 let totalBytes = 0;
 let totalMs = 0;
 let count = 0;
+
+if (compare) await mkdir('bench-out', { recursive: true });
 
 for (const file of files) {
   const { source, img } = await load(file);
   console.log(`\n${path.basename(file)}  ${img.width}x${img.height}  (source ${kB(source).trim()})`);
 
+  if (compare) {
+    const srcLuma = luma(img);
+    const stem = path.basename(file, path.extname(file));
+    let ref = null;
+
+    for (const q of compare) {
+      const r = await measure(img, { ...ENCODE_DEFAULTS, quality: q });
+      const back = await decodeAvif(r.buf);
+      const db = psnr(img, back);
+      const ss = ssim(srcLuma, luma(back), img.width, img.height);
+      const out = `bench-out/${stem}-q${q}.png`;
+      await writeFile(out, Buffer.from(await encodePng(back)));
+
+      const delta = ref
+        ? `  ${db - ref.db >= 0 ? '+' : ''}${(db - ref.db).toFixed(2)} dB, ${(((r.bytes / ref.bytes) - 1) * 100).toFixed(0)}% bytes vs quality ${compare[0]}`
+        : '  (the reference)';
+      console.log(
+        `  quality ${String(q).padStart(3)}  ${kB(r.bytes)}  ${db.toFixed(2).padStart(6)} dB  SSIM ${ss.toFixed(5)}${delta}`,
+      );
+      console.log(`            wrote ${out}`);
+      ref ??= { db, bytes: r.bytes };
+    }
+    console.log('  Open them at 100% and flip between them. If you cannot tell which is');
+    console.log('  which, the higher quality is not earning its bytes on photos like this.');
+    continue;
+  }
+
   if (!sweep) {
-    const budget = budgetFor(img.width, img.height);
+    const r = await measure(img, ENCODE_DEFAULTS);
+    const pct = ((r.bytes / source) * 100).toFixed(1);
     console.log(
-      `  ladder ${QUALITY_LADDER.join(' -> ')} at speed ${ENCODE.speed}, budget ${kB(budget).trim()}`,
+      `  defaults (quality ${ENCODE_DEFAULTS.quality}, speed ${ENCODE_DEFAULTS.speed}` +
+      `${ENCODE_DEFAULTS.enableSharpYUV ? ', sharp YUV' : ''})`,
     );
-
-    const started = Date.now();
-    let kept = 0;
-    const { quality } = await encodeWithinBudget(img.width, img.height, async (q) => {
-      const r = await measure(img, { ...ENCODE, quality: q });
-      kept = r.bytes;
-      const over = ((r.bytes / budget - 1) * 100).toFixed(0);
-      const verdict = r.bytes <= budget ? 'fits' : `over budget by ${over}%`;
-      console.log(`    quality ${String(q).padStart(3)}  ${kB(r.bytes)}  ${secs(r.ms)}   ${verdict}`);
-      return r.buf;
-    });
-
-    const ms = Date.now() - started;
-    const pct = ((kept / source) * 100).toFixed(1);
-    console.log(`  published at quality ${quality}: ${kB(kept).trim()} in ${secs(ms).trim()}  (${pct}% of source)`);
-    landed.set(quality, (landed.get(quality) ?? 0) + 1);
-    totalBytes += kept;
-    totalMs += ms;
+    console.log(`  ${kB(r.bytes)}  ${secs(r.ms)}   ${pct}% of source`);
+    totalBytes += r.bytes;
+    totalMs += r.ms;
     count++;
     continue;
   }
@@ -133,26 +213,20 @@ for (const file of files) {
     console.error(`unknown sweep "${sweep}" (use: ${Object.keys(SWEEPS).join(', ')})`);
     process.exit(1);
   }
-  console.log(`  ${sweep} sweep, top rung (quality ${QUALITY_LADDER[0]}) unless swept:`);
+  console.log(`  ${sweep} sweep, other settings left at the defaults:`);
   let best = null;
   for (const v of values) {
-    const r = await measure(img, { ...ENCODE, quality: QUALITY_LADDER[0], [sweep]: v });
+    const r = await measure(img, { ...ENCODE_DEFAULTS, [sweep]: v });
     if (!best || r.bytes < best.bytes) best = { v, ...r };
     console.log(`    ${sweep}=${String(v).padStart(3)}  ${kB(r.bytes)}  ${secs(r.ms)}`);
   }
   console.log(`  smallest: ${sweep}=${best.v} at ${kB(best.bytes).trim()}`);
 }
 
-if (!sweep && count) {
-  const rungs = [...landed.entries()]
-    .sort((a, b) => b[0] - a[0])
-    .map(([q, n]) => `${n} at quality ${q}`)
-    .join(', ');
-  console.log(`\n${count} photo${count === 1 ? '' : 's'}: ${rungs}`);
+if (!sweep && !compare && count) {
   console.log(
-    `average ${kB(totalBytes / count).trim()} in ${secs(totalMs / count).trim()} each.` +
-    `\nIf nothing ever leaves the top rung the budget is too loose; if most photos` +
-    `\nfall to the floor it is too tight and you are paying for encodes you throw away.`,
+    `\n${count} photo${count === 1 ? '' : 's'}: average ${kB(totalBytes / count).trim()}` +
+    ` in ${secs(totalMs / count).trim()} each`,
   );
 }
 

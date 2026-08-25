@@ -1,5 +1,12 @@
 import type { Index, Photo } from '../types.js';
-import { SHARD_SIZE } from '../config.js';
+import {
+  SHARD_SIZE,
+  ENCODE_DEFAULTS,
+  ENCODE_BOUNDS,
+  coerceEncodeSettings,
+  isDefaultEncodeSettings,
+  type EncodeSettings,
+} from '../config.js';
 import { readExif, type Exif } from './exif.js';
 import { emptyIndex, planPublish } from './manifest.js';
 import {
@@ -28,10 +35,16 @@ const els = {
   queue: $<HTMLUListElement>('queue'),
   publish: $<HTMLButtonElement>('publish'),
   pubStatus: $('pubStatus'),
+  encQuality: $<HTMLInputElement>('encQuality'),
+  encSpeed: $<HTMLInputElement>('encSpeed'),
+  encSharp: $<HTMLInputElement>('encSharp'),
+  encReset: $<HTMLButtonElement>('encReset'),
+  encodeState: $('encodeState'),
 };
 
 const LS_TOKEN = 'photos.token';
 const LS_REPO = 'photos.repo';
+const LS_ENCODE = 'photos.encode';
 
 // ---------------------------------------------------------------- settings
 
@@ -91,9 +104,72 @@ els.forget.addEventListener('click', () => {
   els.settings.open = true;
 });
 
+// ------------------------------------------------------- encoder settings
+
+// Read once at startup and kept here, because the worker cannot see
+// localStorage: every job carries a copy of this object across postMessage.
+let encodeSettings: EncodeSettings = ENCODE_DEFAULTS;
+
+function showEncodeSettings(): void {
+  els.encQuality.value = String(encodeSettings.quality);
+  els.encSpeed.value = String(encodeSettings.speed);
+  els.encSharp.checked = encodeSettings.enableSharpYUV;
+  const isDefault = isDefaultEncodeSettings(encodeSettings);
+  // Name the checkbox when it is off: without it, turning only Sharp YUV off
+  // leaves a pill reading exactly like the defaults it is no longer showing.
+  const sharp = encodeSettings.enableSharpYUV ? '' : ', no sharp YUV';
+  els.encodeState.textContent = isDefault
+    ? 'defaults'
+    : `quality ${encodeSettings.quality}, speed ${encodeSettings.speed}${sharp}`;
+  els.encodeState.className = `pill ${isDefault ? '' : 'ok'}`;
+}
+
+/**
+ * Read the form back through the same coercion the stored value goes through,
+ * so a half-typed or out-of-range field falls back to its default rather than
+ * reaching the encoder. Writing the coerced value straight back into the inputs
+ * is what makes that visible instead of silently ignored.
+ */
+function saveEncodeSettings(): void {
+  encodeSettings = coerceEncodeSettings({
+    quality: els.encQuality.value,
+    speed: els.encSpeed.value,
+    enableSharpYUV: els.encSharp.checked,
+  });
+  localStorage.setItem(LS_ENCODE, JSON.stringify(encodeSettings));
+  showEncodeSettings();
+}
+
+function loadEncodeSettings(): void {
+  const stored = localStorage.getItem(LS_ENCODE);
+  try {
+    encodeSettings = coerceEncodeSettings(stored === null ? null : JSON.parse(stored));
+  } catch {
+    // Not JSON at all. Defaults, and the next edit overwrites the junk.
+    encodeSettings = ENCODE_DEFAULTS;
+  }
+  els.encQuality.min = String(ENCODE_BOUNDS.quality.min);
+  els.encQuality.max = String(ENCODE_BOUNDS.quality.max);
+  els.encSpeed.min = String(ENCODE_BOUNDS.speed.min);
+  els.encSpeed.max = String(ENCODE_BOUNDS.speed.max);
+  showEncodeSettings();
+}
+
+// 'change' rather than 'input': coercing mid-keystroke would fight the typist,
+// turning a half-typed "6" into 6 before "68" is finished.
+for (const input of [els.encQuality, els.encSpeed, els.encSharp]) {
+  input.addEventListener('change', saveEncodeSettings);
+}
+
+els.encReset.addEventListener('click', () => {
+  localStorage.removeItem(LS_ENCODE);
+  encodeSettings = ENCODE_DEFAULTS;
+  showEncodeSettings();
+});
+
 // ---------------------------------------------------------- encoding pool
 
-type Ready = { w: number; h: number; c: string; q: number; variants: [number, ArrayBuffer][] };
+type Ready = { w: number; h: number; c: string; variants: [number, ArrayBuffer][] };
 
 type Item = {
   file: File;
@@ -117,12 +193,7 @@ const workerUrl = new URL('./encode.worker.js', import.meta.url);
 // Leave a core free so the page stays responsive while encoding.
 const POOL = Math.max(1, Math.min(3, (navigator.hardwareConcurrency || 2) - 1));
 
-type Job = {
-  file: File;
-  note: (text: string) => void;
-  resolve: (r: Ready) => void;
-  reject: (e: Error) => void;
-};
+type Job = { file: File; resolve: (r: Ready) => void; reject: (e: Error) => void };
 const waiting: Job[] = [];
 const idle: Worker[] = [];
 let spawned = 0;
@@ -148,11 +219,6 @@ function pump(): void {
     };
     const onMessage = (ev: MessageEvent<EncodeResponse>): void => {
       if (ev.data.jobId !== jobId) return;
-      // Progress note: the worker is still on this job, so hold the worker.
-      if ('note' in ev.data) {
-        job.note(ev.data.note);
-        return;
-      }
       release();
       if (ev.data.ok) job.resolve(ev.data);
       else job.reject(new Error(ev.data.error));
@@ -163,14 +229,16 @@ function pump(): void {
     };
     w.addEventListener('message', onMessage);
     w.addEventListener('error', onError);
-    const req: EncodeRequest = { jobId, file: job.file };
+    // A copy per job, so editing the settings mid-queue cannot change what an
+    // already-running encode is doing.
+    const req: EncodeRequest = { jobId, file: job.file, encode: { ...encodeSettings } };
     w.postMessage(req);
   }
 }
 
-const encodeInWorker = (file: File, note: (text: string) => void): Promise<Ready> =>
+const encodeInWorker = (file: File): Promise<Ready> =>
   new Promise<Ready>((resolve, reject) => {
-    waiting.push({ file, note, resolve, reject });
+    waiting.push({ file, resolve, reject });
     pump();
   });
 
@@ -333,7 +401,7 @@ async function addFile(file: File): Promise<void> {
   refreshPublish();
 
   try {
-    const ready = await encodeInWorker(file, (text) => setState(item, text));
+    const ready = await encodeInWorker(file);
     const main =
       ready.variants.find(([w]) => w === 800) ?? ready.variants[ready.variants.length - 1];
     if (!main) throw new Error('encoder produced no output');
@@ -343,13 +411,7 @@ async function addFile(file: File): Promise<void> {
     item.status = 'ready';
 
     const total = ready.variants.reduce((n, [, b]) => n + b.byteLength, 0);
-    // Quality is worth showing: it is the same for most photos, so a lower one
-    // is the visible sign that this photo hit the byte budget and stepped down.
-    setState(
-      item,
-      `${ready.w}x${ready.h} · ${(total / 1024).toFixed(0)} kB · quality ${ready.q}`,
-      'ok',
-    );
+    setState(item, `${ready.w}x${ready.h} · ${(total / 1024).toFixed(0)} kB total`, 'ok');
 
     // Swap the preview to the encoded result: what you see is what publishes.
     const small = ready.variants[0];
@@ -522,3 +584,4 @@ async function publish(): Promise<void> {
 els.publish.addEventListener('click', () => void publish());
 
 loadSettings();
+loadEncodeSettings();

@@ -1,23 +1,14 @@
 /// <reference lib="webworker" />
 import encode, { init as initAvif } from '@jsquash/avif/encode.js';
 import wasmUrl from '@jsquash/avif/codec/enc/avif_enc.wasm';
-import { WIDTHS, ENCODE, encodeWithinBudget } from '../config.js';
+import { WIDTHS, type EncodeSettings } from '../config.js';
 
-export type EncodeRequest = { jobId: number; file: File };
+// Settings ride along with the file: they live in localStorage, which a worker
+// cannot read, so the page has to hand them over with the job.
+export type EncodeRequest = { jobId: number; file: File; encode: EncodeSettings };
 export type EncodeResponse =
-  | {
-      jobId: number;
-      ok: true;
-      w: number;
-      h: number;
-      c: string;
-      /** Quality rung the widest variant settled on. Shown in the queue. */
-      q: number;
-      variants: [number, ArrayBuffer][];
-    }
-  | { jobId: number; ok: false; error: string }
-  /** Progress only; the job is still running. Encoding is slow enough to say so. */
-  | { jobId: number; note: string };
+  | { jobId: number; ok: true; w: number; h: number; c: string; variants: [number, ArrayBuffer][] }
+  | { jobId: number; ok: false; error: string };
 
 const ctx = self as unknown as DedicatedWorkerGlobalScope;
 
@@ -77,9 +68,9 @@ function dominant(src: CanvasImageSource, sw: number, sh: number): string {
   return `#${hex(d[0] ?? 0)}${hex(d[1] ?? 0)}${hex(d[2] ?? 0)}`;
 }
 
-type Done = { w: number; h: number; c: string; q: number; variants: [number, ArrayBuffer][] };
+type Done = { w: number; h: number; c: string; variants: [number, ArrayBuffer][] };
 
-async function run(file: File, note: (text: string) => void): Promise<Done> {
+async function run(file: File, settings: EncodeSettings): Promise<Done> {
   await ensureReady();
 
   // 'from-image' applies EXIF orientation during decode. We re-encode raw
@@ -101,47 +92,28 @@ async function run(file: File, note: (text: string) => void): Promise<Done> {
     let sw = bitmap.width;
     let sh = bitmap.height;
     let widest = { w: 0, h: 0 };
-    let quality = 0;
 
     for (const target of descending) {
       const canvas = scaleTo(source, sw, sh, target);
       const pixels = ctxOf(canvas).getImageData(0, 0, canvas.width, canvas.height);
-
-      // Every rung is seconds of work at ENCODE.speed, so report each attempt:
-      // a photo that walks the whole ladder is otherwise half a minute of
-      // motionless "encoding...".
-      const encoded = await encodeWithinBudget(
-        canvas.width,
-        canvas.height,
-        (q) => encode(pixels, { ...ENCODE, quality: q }),
-        (q, attempt) =>
-          note(attempt === 0 ? `encoding at quality ${q}...` : `too big, retrying at ${q}...`),
-      );
-
-      variants.push([target, encoded.buf]);
-      if (!widest.w) {
-        widest = { w: canvas.width, h: canvas.height };
-        quality = encoded.quality;
-      }
+      const buf = await encode(pixels, settings);
+      variants.push([target, buf]);
+      if (!widest.w) widest = { w: canvas.width, h: canvas.height };
       source = canvas;
       sw = canvas.width;
       sh = canvas.height;
     }
 
     variants.sort((a, b) => a[0] - b[0]);
-    return { w: widest.w, h: widest.h, c, q: quality, variants };
+    return { w: widest.w, h: widest.h, c, variants };
   } finally {
     bitmap.close();
   }
 }
 
 ctx.addEventListener('message', (ev: MessageEvent<EncodeRequest>) => {
-  const { jobId, file } = ev.data;
-  const note = (text: string): void => {
-    const msg: EncodeResponse = { jobId, note: text };
-    ctx.postMessage(msg);
-  };
-  void run(file, note).then(
+  const { jobId, file, encode: settings } = ev.data;
+  void run(file, settings).then(
     (res) => {
       const msg: EncodeResponse = { jobId, ok: true, ...res };
       ctx.postMessage(msg, res.variants.map(([, b]) => b));
