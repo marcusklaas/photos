@@ -200,9 +200,19 @@ re-measure on photos you would actually publish:
 
 ```sh
 npm run bench -- photo.jpg              # runs the real ladder, rung by rung
+npm run bench -- --compare photo.jpg    # top rung vs floor, decoded, side by side
 npm run bench -- --sweep quality photo.jpg
 npm run bench -- --sweep speed   photo.jpg
 ```
+
+`--compare` is the one that answers "can I actually see quality 68". It encodes
+at the top rung and the floor, decodes both back, prints PSNR and SSIM against
+the source pixels, and writes the decoded results to `bench-out/` as PNG. Open
+both at 100% and flip between them: at 800px shown one image pixel per device
+pixel you are looking at exactly the encoded pixels, with no resampling to hide
+quantization, so the difference is as visible as it will ever get. If you cannot
+tell which is which, the top rung is not earning its bytes on photos like yours,
+and the honest move is to lower the ladder rather than pay for it.
 
 With no `--sweep`, bench walks the same ladder the uploader does and finishes
 with a tally of which rung each photo landed on. That tally is the whole
@@ -220,6 +230,7 @@ npx serve dist                  # or any static server
 npm run check                   # typecheck
 npm test                        # sharding + the quality ladder
 npm run bench -- photo.jpg      # encoder size/time on a real photo
+npm run bench -- --compare a.jpg # quality 68 vs 55, decoded to bench-out/
 ```
 
 The fixture means the whole stream is testable with no network and no GitHub.

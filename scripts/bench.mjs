@@ -2,8 +2,15 @@
  * Measures AVIF size and encode time across encoder settings, on YOUR photos.
  *
  *   node scripts/bench.mjs photo.jpg [more.jpg ...]
+ *   node scripts/bench.mjs --compare photo.jpg   # is the top rung worth it?
  *   node scripts/bench.mjs --sweep speed   photo.jpg
  *   node scripts/bench.mjs --sweep quality photo.jpg
+ *
+ * --compare answers the only question that matters about QUALITY_LADDER's top
+ * rung: can you see it. It encodes at the top and the floor, decodes both back,
+ * prints how far each landed from the source pixels, and writes the decoded
+ * results to bench-out/ as PNG so you can flip between them at 1:1. Numbers
+ * first, but the numbers are not the verdict -- your eyes are.
  *
  * With no --sweep it runs the real quality ladder, rung by rung, exactly as the
  * uploader does -- so it answers the two questions worth asking about
@@ -15,9 +22,11 @@
  * publish, at the size we actually publish (default 800px wide).
  */
 import encodeAvif, { init as initAvif } from '@jsquash/avif/encode.js';
+import decodeAvif, { init as initAvifDec } from '@jsquash/avif/decode.js';
 import decodeJpeg, { init as initJpeg } from '@jsquash/jpeg/decode.js';
 import decodePng, { init as initPng } from '@jsquash/png/decode.js';
-import { readFile } from 'node:fs/promises';
+import encodePng, { init as initPngEnc } from '@jsquash/png/encode.js';
+import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import {
   ENCODE,
@@ -29,14 +38,16 @@ import {
 
 const args = process.argv.slice(2);
 let sweep = null;
+let compare = false;
 const files = [];
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--sweep') sweep = args[++i];
+  else if (args[i] === '--compare') compare = true;
   else files.push(args[i]);
 }
 
 if (!files.length) {
-  console.error('usage: node scripts/bench.mjs [--sweep speed|quality] <image> [...]');
+  console.error('usage: node scripts/bench.mjs [--compare] [--sweep speed|quality] <image> [...]');
   process.exit(1);
 }
 
@@ -45,6 +56,10 @@ const compile = async (rel) => WebAssembly.compile(await readFile(new URL(rel, N
 await initAvif(await compile('@jsquash/avif/codec/enc/avif_enc.wasm'));
 await initJpeg(await compile('@jsquash/jpeg/codec/dec/mozjpeg_dec.wasm'));
 await initPng(await compile('@jsquash/png/codec/pkg/squoosh_png_bg.wasm'));
+if (compare) {
+  await initAvifDec(await compile('@jsquash/avif/codec/dec/avif_dec.wasm'));
+  await initPngEnc(await compile('@jsquash/png/codec/pkg/squoosh_png_bg.wasm'));
+}
 
 const TARGET = Number(process.env.BENCH_WIDTH ?? WIDTHS[WIDTHS.length - 1]);
 
@@ -77,6 +92,49 @@ async function load(file) {
   return { source: bytes.length, img: resize(raw, TARGET) };
 }
 
+/**
+ * Distortion against the source pixels. PSNR is blunt but comparable across
+ * rungs; SSIM tracks structure, which is closer to what "looks worse" means.
+ * Neither is a verdict -- --compare writes the decoded PNGs so you can look.
+ */
+function psnr(a, b) {
+  let se = 0;
+  for (let i = 0; i < a.data.length; i++) if (i % 4 !== 3) se += (a.data[i] - b.data[i]) ** 2;
+  const mse = se / ((a.data.length / 4) * 3);
+  return mse === 0 ? Infinity : 10 * Math.log10((255 * 255) / mse);
+}
+
+const luma = (img) => {
+  const g = new Float64Array(img.width * img.height);
+  for (let i = 0; i < g.length; i++)
+    g[i] = 0.2126 * img.data[i * 4] + 0.7152 * img.data[i * 4 + 1] + 0.0722 * img.data[i * 4 + 2];
+  return g;
+};
+
+/** Mean SSIM over 8x8 luma windows, stepped by 4. */
+function ssim(a, b, w, h) {
+  const C1 = (0.01 * 255) ** 2, C2 = (0.03 * 255) ** 2;
+  let total = 0, n = 0;
+  for (let by = 0; by + 8 <= h; by += 4) {
+    for (let bx = 0; bx + 8 <= w; bx += 4) {
+      let ma = 0, mb = 0;
+      for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) {
+        ma += a[(by + y) * w + bx + x]; mb += b[(by + y) * w + bx + x];
+      }
+      ma /= 64; mb /= 64;
+      let va = 0, vb = 0, cov = 0;
+      for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) {
+        const da = a[(by + y) * w + bx + x] - ma, db = b[(by + y) * w + bx + x] - mb;
+        va += da * da; vb += db * db; cov += da * db;
+      }
+      va /= 63; vb /= 63; cov /= 63;
+      total += ((2 * ma * mb + C1) * (2 * cov + C2)) / ((ma * ma + mb * mb + C1) * (va + vb + C2));
+      n++;
+    }
+  }
+  return total / n;
+}
+
 const kB = (n) => `${(n / 1024).toFixed(0).padStart(5)} kB`;
 const secs = (ms) => `${(ms / 1000).toFixed(1).padStart(6)}s`;
 
@@ -97,9 +155,40 @@ let totalBytes = 0;
 let totalMs = 0;
 let count = 0;
 
+if (compare) await mkdir('bench-out', { recursive: true });
+
 for (const file of files) {
   const { source, img } = await load(file);
   console.log(`\n${path.basename(file)}  ${img.width}x${img.height}  (source ${kB(source).trim()})`);
+
+  if (compare) {
+    const floor = QUALITY_LADDER[QUALITY_LADDER.length - 1];
+    const top = QUALITY_LADDER[0];
+    const srcLuma = luma(img);
+    const stem = path.basename(file, path.extname(file));
+    let ref = null;
+
+    for (const q of [floor, top]) {
+      const r = await measure(img, { ...ENCODE, quality: q });
+      const back = await decodeAvif(r.buf);
+      const db = psnr(img, back);
+      const ss = ssim(srcLuma, luma(back), img.width, img.height);
+      const out = `bench-out/${stem}-q${q}.png`;
+      await writeFile(out, Buffer.from(await encodePng(back)));
+
+      const delta = ref
+        ? `  ${db - ref.db >= 0 ? '+' : ''}${(db - ref.db).toFixed(2)} dB, ${(((r.bytes / ref.bytes) - 1) * 100).toFixed(0)}% bytes vs quality ${floor}`
+        : '  (the floor rung, for reference)';
+      console.log(
+        `  quality ${String(q).padStart(3)}  ${kB(r.bytes)}  ${db.toFixed(2).padStart(6)} dB  SSIM ${ss.toFixed(5)}${delta}`,
+      );
+      ref ??= { db, bytes: r.bytes };
+      console.log(`            wrote ${out}`);
+    }
+    console.log('  Open both at 100% and flip between them. If you cannot tell which');
+    console.log('  is which, the top rung is not earning its bytes on photos like this.');
+    continue;
+  }
 
   if (!sweep) {
     const budget = budgetFor(img.width, img.height);
