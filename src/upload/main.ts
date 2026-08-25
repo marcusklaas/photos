@@ -93,7 +93,7 @@ els.forget.addEventListener('click', () => {
 
 // ---------------------------------------------------------- encoding pool
 
-type Ready = { w: number; h: number; c: string; variants: [number, ArrayBuffer][] };
+type Ready = { w: number; h: number; c: string; q: number; variants: [number, ArrayBuffer][] };
 
 type Item = {
   file: File;
@@ -117,7 +117,12 @@ const workerUrl = new URL('./encode.worker.js', import.meta.url);
 // Leave a core free so the page stays responsive while encoding.
 const POOL = Math.max(1, Math.min(3, (navigator.hardwareConcurrency || 2) - 1));
 
-type Job = { file: File; resolve: (r: Ready) => void; reject: (e: Error) => void };
+type Job = {
+  file: File;
+  note: (text: string) => void;
+  resolve: (r: Ready) => void;
+  reject: (e: Error) => void;
+};
 const waiting: Job[] = [];
 const idle: Worker[] = [];
 let spawned = 0;
@@ -143,6 +148,11 @@ function pump(): void {
     };
     const onMessage = (ev: MessageEvent<EncodeResponse>): void => {
       if (ev.data.jobId !== jobId) return;
+      // Progress note: the worker is still on this job, so hold the worker.
+      if ('note' in ev.data) {
+        job.note(ev.data.note);
+        return;
+      }
       release();
       if (ev.data.ok) job.resolve(ev.data);
       else job.reject(new Error(ev.data.error));
@@ -158,9 +168,9 @@ function pump(): void {
   }
 }
 
-const encodeInWorker = (file: File): Promise<Ready> =>
+const encodeInWorker = (file: File, note: (text: string) => void): Promise<Ready> =>
   new Promise<Ready>((resolve, reject) => {
-    waiting.push({ file, resolve, reject });
+    waiting.push({ file, note, resolve, reject });
     pump();
   });
 
@@ -323,7 +333,7 @@ async function addFile(file: File): Promise<void> {
   refreshPublish();
 
   try {
-    const ready = await encodeInWorker(file);
+    const ready = await encodeInWorker(file, (text) => setState(item, text));
     const main =
       ready.variants.find(([w]) => w === 800) ?? ready.variants[ready.variants.length - 1];
     if (!main) throw new Error('encoder produced no output');
@@ -333,7 +343,13 @@ async function addFile(file: File): Promise<void> {
     item.status = 'ready';
 
     const total = ready.variants.reduce((n, [, b]) => n + b.byteLength, 0);
-    setState(item, `${ready.w}x${ready.h} · ${(total / 1024).toFixed(0)} kB total`, 'ok');
+    // Quality is worth showing: it is the same for most photos, so a lower one
+    // is the visible sign that this photo hit the byte budget and stepped down.
+    setState(
+      item,
+      `${ready.w}x${ready.h} · ${(total / 1024).toFixed(0)} kB · quality ${ready.q}`,
+      'ok',
+    );
 
     // Swap the preview to the encoded result: what you see is what publishes.
     const small = ready.variants[0];

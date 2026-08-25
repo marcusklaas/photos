@@ -6,7 +6,7 @@
     "build": "node build.mjs",
     "dev": "node build.mjs --dev",
     "check": "tsc --noEmit",
-    "test": "node scripts/test-manifest.mjs",
+    "test": "node scripts/test-manifest.mjs && node scripts/test-encode.mjs",
     "bench": "node scripts/bench.mjs"
   },
   "devDependencies": {

@@ -1,6 +1,7 @@
-import { COLUMN_PX, WIDTHS, SHARD_SIZE, ENCODE } from './encode-settings.js';
-
-export { COLUMN_PX, WIDTHS, SHARD_SIZE, ENCODE };
+// The encoder settings are re-exported so app code has one import to reach
+// for; they live in their own file only so Node scripts can read them without
+// tripping over the build-time defines below.
+export * from './encode-settings.js';
 
 declare const __MEDIA_BASE_URL__: string;
 declare const __DEV__: boolean;
