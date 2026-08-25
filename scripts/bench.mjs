@@ -5,16 +5,27 @@
  *   node scripts/bench.mjs --sweep speed   photo.jpg
  *   node scripts/bench.mjs --sweep quality photo.jpg
  *
+ * With no --sweep it runs the real quality ladder, rung by rung, exactly as the
+ * uploader does -- so it answers the two questions worth asking about
+ * QUALITY_LADDER and BUDGET_BYTES_PER_MPX: what does a photo cost, and does the
+ * budget bite often enough (or too often) on the photos you actually publish.
+ *
  * Synthetic test images are useless for this: fine grain dominates the bitrate
  * and behaves nothing like real detail. Point it at photos you would actually
- * publish, at the size we actually publish (default 1600px wide).
+ * publish, at the size we actually publish (default 800px wide).
  */
 import encodeAvif, { init as initAvif } from '@jsquash/avif/encode.js';
 import decodeJpeg, { init as initJpeg } from '@jsquash/jpeg/decode.js';
 import decodePng, { init as initPng } from '@jsquash/png/decode.js';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import { ENCODE, WIDTHS } from '../src/encode-settings.ts';
+import {
+  ENCODE,
+  WIDTHS,
+  QUALITY_LADDER,
+  budgetFor,
+  encodeWithinBudget,
+} from '../src/encode-settings.ts';
 
 const args = process.argv.slice(2);
 let sweep = null;
@@ -72,23 +83,48 @@ const secs = (ms) => `${(ms / 1000).toFixed(1).padStart(6)}s`;
 async function measure(img, opts) {
   const t = Date.now();
   const buf = await encodeAvif(img, opts);
-  return { bytes: buf.byteLength, ms: Date.now() - t };
+  return { buf, bytes: buf.byteLength, ms: Date.now() - t };
 }
 
 const SWEEPS = {
-  speed: [0, 2, 4, 6, 8, 10],
-  quality: [35, 45, 55, 65, 75, 85],
+  speed: [0, 2, 4, 5, 6, 8],
+  quality: [35, 45, 55, 62, 68, 75, 85],
 };
+
+/** Which rung photos settle on -- i.e. how often the budget actually bites. */
+const landed = new Map();
+let totalBytes = 0;
+let totalMs = 0;
+let count = 0;
 
 for (const file of files) {
   const { source, img } = await load(file);
   console.log(`\n${path.basename(file)}  ${img.width}x${img.height}  (source ${kB(source).trim()})`);
 
   if (!sweep) {
-    const r = await measure(img, ENCODE);
-    const pct = ((r.bytes / source) * 100).toFixed(1);
-    console.log(`  current settings (quality ${ENCODE.quality}, speed ${ENCODE.speed})`);
-    console.log(`  ${kB(r.bytes)}  ${secs(r.ms)}   ${pct}% of source`);
+    const budget = budgetFor(img.width, img.height);
+    console.log(
+      `  ladder ${QUALITY_LADDER.join(' -> ')} at speed ${ENCODE.speed}, budget ${kB(budget).trim()}`,
+    );
+
+    const started = Date.now();
+    let kept = 0;
+    const { quality } = await encodeWithinBudget(img.width, img.height, async (q) => {
+      const r = await measure(img, { ...ENCODE, quality: q });
+      kept = r.bytes;
+      const over = ((r.bytes / budget - 1) * 100).toFixed(0);
+      const verdict = r.bytes <= budget ? 'fits' : `over budget by ${over}%`;
+      console.log(`    quality ${String(q).padStart(3)}  ${kB(r.bytes)}  ${secs(r.ms)}   ${verdict}`);
+      return r.buf;
+    });
+
+    const ms = Date.now() - started;
+    const pct = ((kept / source) * 100).toFixed(1);
+    console.log(`  published at quality ${quality}: ${kB(kept).trim()} in ${secs(ms).trim()}  (${pct}% of source)`);
+    landed.set(quality, (landed.get(quality) ?? 0) + 1);
+    totalBytes += kept;
+    totalMs += ms;
+    count++;
     continue;
   }
 
@@ -97,14 +133,27 @@ for (const file of files) {
     console.error(`unknown sweep "${sweep}" (use: ${Object.keys(SWEEPS).join(', ')})`);
     process.exit(1);
   }
-  console.log(`  ${sweep} sweep, everything else at current settings:`);
+  console.log(`  ${sweep} sweep, top rung (quality ${QUALITY_LADDER[0]}) unless swept:`);
   let best = null;
   for (const v of values) {
-    const r = await measure(img, { ...ENCODE, [sweep]: v });
+    const r = await measure(img, { ...ENCODE, quality: QUALITY_LADDER[0], [sweep]: v });
     if (!best || r.bytes < best.bytes) best = { v, ...r };
     console.log(`    ${sweep}=${String(v).padStart(3)}  ${kB(r.bytes)}  ${secs(r.ms)}`);
   }
   console.log(`  smallest: ${sweep}=${best.v} at ${kB(best.bytes).trim()}`);
+}
+
+if (!sweep && count) {
+  const rungs = [...landed.entries()]
+    .sort((a, b) => b[0] - a[0])
+    .map(([q, n]) => `${n} at quality ${q}`)
+    .join(', ');
+  console.log(`\n${count} photo${count === 1 ? '' : 's'}: ${rungs}`);
+  console.log(
+    `average ${kB(totalBytes / count).trim()} in ${secs(totalMs / count).trim()} each.` +
+    `\nIf nothing ever leaves the top rung the budget is too loose; if most photos` +
+    `\nfall to the floor it is too tight and you are paying for encodes you throw away.`,
+  );
 }
 
 console.log(

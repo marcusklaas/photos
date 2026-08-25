@@ -52,7 +52,9 @@ pixels: an 800px image at its natural size is 800 *CSS* px, which on a 2x displa
 is 1600 *device* px, so the browser upscales it and it looks soft. There is no
 "render natively" mode that avoids this — the only fixes are a higher-resolution
 variant or a smaller displayed size. We chose the latter: sharp everywhere at
-87 kB/photo, where a 2x variant measured 285 kB.
+87 kB/photo, where a 2x variant measured 285 kB. (Both measured at the old flat
+quality 55; [the ladder](#tuning-compression) spends more than that now, but the
+ratio between them is unchanged.)
 
 The tradeoff is physical size — a photo is half as wide on a retina screen as on
 a 1x one, and leaves margins on high-DPI phones. If that ever grates, add
@@ -105,8 +107,11 @@ Everything happens in your browser before anything is committed:
    in EXIF orientation — we re-encode raw pixels, so skipping this publishes
    sideways photos sideways.
 3. Downscaled in halving steps (a single big-ratio `drawImage` aliases badly),
-   then encoded to AVIF at 800px wide by a WASM encoder in a worker. Narrower
-   sources are never upscaled — they publish and display at their own width.
+   then encoded to AVIF at 800px wide by a WASM encoder in a worker, walking
+   [the quality ladder](#tuning-compression) until the result fits its byte
+   budget. Narrower sources are never upscaled — they publish and display at
+   their own width. Expect seconds per photo, not milliseconds; the queue shows
+   which rung each one is on.
 4. Blobs, a tree and a commit go up through the Git Data API as **one atomic
    commit**. If the branch moved meanwhile, it re-reads the manifest and retries
    rather than force-pushing over whatever landed.
@@ -135,10 +140,38 @@ The encoder is **libavif v1.0.1** compiled to WASM, via `@jsquash/avif` (a
 repackaging of Squoosh's codec). It runs single-threaded: the multithreaded build
 needs `SharedArrayBuffer`, which needs COOP/COEP headers, which Pages cannot set.
 
-`src/encode-settings.ts` holds the options — library defaults, except
-`quality: 55` (0-100, higher is better; this is *not* libavif's cq-level).
+`src/encode-settings.ts` holds everything. A photo is not encoded once at a fixed
+quality — it walks a **quality ladder** until it fits a **byte budget**:
 
-Lowering `speed` below its default of 6 is a trap, measured on a 1600x2000 image:
+| Knob | Value | What it does |
+|---|---|---|
+| `QUALITY_LADDER` | `[68, 62, 55]` | Rungs to try, best first. Most photos never leave 68. |
+| `BUDGET_BYTES_PER_MPX` | 200 kB | Over this, the photo drops a rung and is re-encoded. |
+| `ENCODE.speed` | 5 | One below the library default. Slower, denser. |
+| `ENCODE.enableSharpYUV` | true | Better RGB→YUV 4:2:0 conversion; near-free. |
+
+Two properties make this safe to leave alone:
+
+- **Low-complexity photos cost one encode.** A flat sky fits at quality 68
+  immediately and never sees the rest of the ladder — it gets the quality bump
+  *and* stays tiny, because constant-quality AVIF already spends bytes in
+  proportion to detail. Only genuinely busy photos pay for the extra passes,
+  which is the only place the extra time buys anything.
+- **The floor is 55**, which is what every photo used to get unconditionally. So
+  nothing published from here on is encoded worse than what is already in the
+  media repo; the ladder can only ever hand a photo more bytes than the old
+  settings did, up to the budget.
+
+The budget is the "don't go overboard" knob, and it is per megapixel so a tall
+portrait is not punished for being taller than a landscape. At 800x1067 it works
+out to a ~170 kB ceiling. It sits deliberately *above* what an ordinary photo
+costs at quality 68, so it clips the tail instead of clawing the quality bump
+back from everything.
+
+### On `speed`
+
+Lowering `speed` below its default of 6 was measured as a trap on a 1600x2000
+image:
 
 | speed | size | time |
 |---|---|---|
@@ -147,21 +180,35 @@ Lowering `speed` below its default of 6 is a trap, measured on a 1600x2000 image
 | 6 | 325 kB | 3.0 s |
 | 8 | 311 kB | 0.6 s |
 
-Slower settings produced *larger* files here, and there is a cliff between 4 and 6
-where libaom changes algorithm. Whether the size inversion is real or an artifact
-of grain in the test image is unsettled — but there is no reading of this where
-sub-default `speed` earns its 100x time cost.
+That still holds for 0-3: there is no reading of it where they earn their 100x
+time cost, and there is a cliff between 4 and 6 where libaom changes algorithm.
+Speed 5 sits inside that cliff and was never in the table. Measured since, at our
+actual 800px publish size, it comes out **5-10% smaller than speed 6 at the same
+quality, for 4-10x the time** (3-5 s per encode against 0.4-1.3 s), and no worse
+than speed 4 while being ~50% quicker. Those bytes are what pays for the higher
+quality rungs.
 
-Measure on your own photos before changing anything:
+Full 4:4:4 chroma (`subsample: 3`) was measured at +27% to +70% bytes and did not
+survive the "still small" test. `enableSharpYUV` gets some of the same benefit —
+cleaner colour on saturated edges — for ~0-4%.
+
+**Caveat worth knowing:** the speed-5 and chroma numbers above came from
+synthetic images, because that is what was to hand. The README is right that
+synthetic images are useless for absolute sizes — fine grain dominates the
+bitrate and behaves nothing like real detail — so treat them as directional and
+re-measure on photos you would actually publish:
 
 ```sh
-npm run bench -- photo.jpg
+npm run bench -- photo.jpg              # runs the real ladder, rung by rung
 npm run bench -- --sweep quality photo.jpg
 npm run bench -- --sweep speed   photo.jpg
 ```
 
-Synthetic images are useless for this — fine grain dominates the bitrate and
-behaves nothing like real detail.
+With no `--sweep`, bench walks the same ladder the uploader does and finishes
+with a tally of which rung each photo landed on. That tally is the whole
+calibration: if nothing ever leaves the top rung the budget is too loose, and if
+most photos fall to the floor it is too tight and you are paying for encodes that
+get thrown away.
 
 ## Development
 
@@ -171,7 +218,7 @@ node scripts/make-fixture.mjs   # procedural photos in ./fixture
 npm run dev                     # builds to dist/, copies fixture to dist/media
 npx serve dist                  # or any static server
 npm run check                   # typecheck
-npm test                        # sharding logic
+npm test                        # sharding + the quality ladder
 npm run bench -- photo.jpg      # encoder size/time on a real photo
 ```
 
